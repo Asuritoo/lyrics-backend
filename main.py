@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 import httpx
 import os
 import tempfile
@@ -15,16 +16,47 @@ app.add_middleware(
 )
 
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+YOUTUBE_API_KEY  = os.environ.get("YOUTUBE_API_KEY")
+SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
+APP_URL = "https://lyrics-teleprompter-ebon.vercel.app"
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+@app.get("/callback")
+async def spotify_callback(request: Request):
+    code  = request.query_params.get("code")
+    error = request.query_params.get("error")
+    if error or not code:
+        return RedirectResponse(f"{APP_URL}?spotify_error=1")
+    verifier = request.query_params.get("state", "")
+    # Exchange code for token
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://accounts.spotify.com/api/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": f"https://lyrics-backend-production.up.railway.app/callback",
+                "client_id": SPOTIFY_CLIENT_ID,
+                "code_verifier": verifier,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if not r.ok:
+        return RedirectResponse(f"{APP_URL}?spotify_error=1")
+    data = r.json()
+    token        = data.get("access_token", "")
+    expires_in   = data.get("expires_in", 3600)
+    refresh_token = data.get("refresh_token", "")
+    return RedirectResponse(
+        f"{APP_URL}?spotify_token={token}&spotify_expires={expires_in}&spotify_refresh={refresh_token}"
+    )
+
 @app.get("/search")
 async def search_lyrics(title: str, artist: str = ""):
     async with httpx.AsyncClient() as client:
-        # Paroles LRCLIB
         lrc_params = {"track_name": title, "artist_name": artist}
         lrc_r = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=10)
         lyrics_data = {}
@@ -37,22 +69,13 @@ async def search_lyrics(title: str, artist: str = ""):
                 "synced": best.get("syncedLyrics"),
                 "plain": best.get("plainLyrics"),
             }
-
-        # Recherche YouTube
         youtube_data = {}
         if YOUTUBE_API_KEY:
             query = f"{title} {artist} official audio"
-            yt_params = {
-                "part": "snippet",
-                "q": query,
-                "type": "video",
-                "maxResults": 5,
-                "key": YOUTUBE_API_KEY,
-            }
+            yt_params = {"part": "snippet", "q": query, "type": "video", "maxResults": 5, "key": YOUTUBE_API_KEY}
             yt_r = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=10)
             if yt_r.status_code == 200:
                 items = yt_r.json().get("items", [])
-                # Préférer "official audio" ou "lyrics" dans le titre
                 best_yt = None
                 for item in items:
                     t = item["snippet"]["title"].lower()
@@ -67,11 +90,9 @@ async def search_lyrics(title: str, artist: str = ""):
                         "videoTitle": best_yt["snippet"]["title"],
                         "thumbnail": best_yt["snippet"]["thumbnails"]["medium"]["url"],
                     }
-
     if not lyrics_data and not youtube_data:
         raise HTTPException(404, "Rien trouvé")
-
-    return { **lyrics_data, **youtube_data }
+    return {**lyrics_data, **youtube_data}
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
@@ -88,10 +109,7 @@ async def transcribe(file: UploadFile = File(...)):
                 response_format="verbose_json",
                 timestamp_granularities=["segment"],
             )
-        segments = [
-            {"start": s.start, "end": s.end, "text": s.text.strip()}
-            for s in result.segments
-        ]
+        segments = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in result.segments]
         return {"segments": segments}
     finally:
         os.unlink(tmp_path)
