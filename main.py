@@ -16,9 +16,10 @@ app.add_middleware(
 )
 
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-YOUTUBE_API_KEY  = os.environ.get("YOUTUBE_API_KEY")
+YOUTUBE_API_KEY   = os.environ.get("YOUTUBE_API_KEY")
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
-APP_URL = "https://lyrics-teleprompter-ebon.vercel.app"
+APP_URL           = "https://lyrics-teleprompter-ebon.vercel.app"
+BACKEND_URL       = "https://lyrics-backend-production.up.railway.app"
 
 @app.get("/")
 def root():
@@ -26,56 +27,64 @@ def root():
 
 @app.get("/callback")
 async def spotify_callback(request: Request):
-    code  = request.query_params.get("code")
-    error = request.query_params.get("error")
+    code     = request.query_params.get("code")
+    error    = request.query_params.get("error")
+    verifier = request.query_params.get("state", "")
+
     if error or not code:
         return RedirectResponse(f"{APP_URL}?spotify_error=1")
-    verifier = request.query_params.get("state", "")
-    # Exchange code for token
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            "https://accounts.spotify.com/api/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": f"https://lyrics-backend-production.up.railway.app/callback",
-                "client_id": SPOTIFY_CLIENT_ID,
-                "code_verifier": verifier,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={
+                    "grant_type":    "authorization_code",
+                    "code":          code,
+                    "redirect_uri":  f"{BACKEND_URL}/callback",
+                    "client_id":     SPOTIFY_CLIENT_ID,
+                    "code_verifier": verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10,
+            )
+        if r.status_code != 200:
+            return RedirectResponse(f"{APP_URL}?spotify_error=1")
+
+        data          = r.json()
+        token         = data.get("access_token", "")
+        expires_in    = data.get("expires_in", 3600)
+        refresh_token = data.get("refresh_token", "")
+
+        return RedirectResponse(
+            f"{APP_URL}?spotify_token={token}&spotify_expires={expires_in}&spotify_refresh={refresh_token}"
         )
-    if not r.ok:
+    except Exception as e:
         return RedirectResponse(f"{APP_URL}?spotify_error=1")
-    data = r.json()
-    token        = data.get("access_token", "")
-    expires_in   = data.get("expires_in", 3600)
-    refresh_token = data.get("refresh_token", "")
-    return RedirectResponse(
-        f"{APP_URL}?spotify_token={token}&spotify_expires={expires_in}&spotify_refresh={refresh_token}"
-    )
 
 @app.get("/search")
 async def search_lyrics(title: str, artist: str = ""):
     async with httpx.AsyncClient() as client:
         lrc_params = {"track_name": title, "artist_name": artist}
-        lrc_r = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=10)
+        lrc_r      = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=10)
         lyrics_data = {}
         if lrc_r.status_code == 200 and lrc_r.json():
             results = lrc_r.json()
-            best = next((x for x in results if x.get("syncedLyrics")), results[0])
+            best    = next((x for x in results if x.get("syncedLyrics")), results[0])
             lyrics_data = {
-                "title": best.get("trackName"),
+                "title":  best.get("trackName"),
                 "artist": best.get("artistName"),
                 "synced": best.get("syncedLyrics"),
-                "plain": best.get("plainLyrics"),
+                "plain":  best.get("plainLyrics"),
             }
+
         youtube_data = {}
         if YOUTUBE_API_KEY:
-            query = f"{title} {artist} official audio"
+            query     = f"{title} {artist} official audio"
             yt_params = {"part": "snippet", "q": query, "type": "video", "maxResults": 5, "key": YOUTUBE_API_KEY}
-            yt_r = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=10)
+            yt_r      = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=10)
             if yt_r.status_code == 200:
-                items = yt_r.json().get("items", [])
+                items   = yt_r.json().get("items", [])
                 best_yt = None
                 for item in items:
                     t = item["snippet"]["title"].lower()
@@ -86,17 +95,19 @@ async def search_lyrics(title: str, artist: str = ""):
                     best_yt = items[0]
                 if best_yt:
                     youtube_data = {
-                        "videoId": best_yt["id"]["videoId"],
+                        "videoId":    best_yt["id"]["videoId"],
                         "videoTitle": best_yt["snippet"]["title"],
-                        "thumbnail": best_yt["snippet"]["thumbnails"]["medium"]["url"],
+                        "thumbnail":  best_yt["snippet"]["thumbnails"]["medium"]["url"],
                     }
+
     if not lyrics_data and not youtube_data:
         raise HTTPException(404, "Rien trouvé")
+
     return {**lyrics_data, **youtube_data}
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    audio = await file.read()
+    audio  = await file.read()
     suffix = "." + (file.filename.split(".")[-1] if file.filename else "mp3")
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(audio)
