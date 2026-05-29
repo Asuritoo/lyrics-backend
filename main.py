@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import httpx
 import os
 import tempfile
+import secrets
+import time
 from groq import Groq
 
 app = FastAPI()
@@ -15,11 +17,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+groq_client       = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 YOUTUBE_API_KEY   = os.environ.get("YOUTUBE_API_KEY")
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
 APP_URL           = "https://lyrics-teleprompter-ebon.vercel.app"
 BACKEND_URL       = "https://lyrics-backend-production.up.railway.app"
+
+# Temporary token store — { code: { token, refresh, expires_at } }
+token_store = {}
+
+def clean_store():
+    now = time.time()
+    expired = [k for k, v in token_store.items() if v["stored_at"] + 120 < now]
+    for k in expired:
+        del token_store[k]
 
 @app.get("/")
 def root():
@@ -48,6 +59,7 @@ async def spotify_callback(request: Request):
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=10,
             )
+
         if r.status_code != 200:
             return RedirectResponse(f"{APP_URL}?spotify_error=1")
 
@@ -56,17 +68,41 @@ async def spotify_callback(request: Request):
         expires_in    = data.get("expires_in", 3600)
         refresh_token = data.get("refresh_token", "")
 
-        return RedirectResponse(
-            f"{APP_URL}?spotify_token={token}&spotify_expires={expires_in}&spotify_refresh={refresh_token}"
-        )
-    except Exception as e:
+        # Store token with short code
+        clean_store()
+        short_code = secrets.token_urlsafe(8)
+        token_store[short_code] = {
+            "token":      token,
+            "refresh":    refresh_token,
+            "expires_in": expires_in,
+            "stored_at":  time.time(),
+        }
+
+        # Redirect to PWA with just the short code
+        return RedirectResponse(f"{APP_URL}?sp={short_code}")
+
+    except Exception:
         return RedirectResponse(f"{APP_URL}?spotify_error=1")
+
+@app.get("/token/{code}")
+async def get_token(code: str):
+    clean_store()
+    entry = token_store.get(code)
+    if not entry:
+        raise HTTPException(404, "Code expiré ou invalide")
+    # Delete after use
+    del token_store[code]
+    return {
+        "access_token":  entry["token"],
+        "refresh_token": entry["refresh"],
+        "expires_in":    entry["expires_in"],
+    }
 
 @app.get("/search")
 async def search_lyrics(title: str, artist: str = ""):
     async with httpx.AsyncClient() as client:
-        lrc_params = {"track_name": title, "artist_name": artist}
-        lrc_r      = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=10)
+        lrc_params  = {"track_name": title, "artist_name": artist}
+        lrc_r       = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=10)
         lyrics_data = {}
         if lrc_r.status_code == 200 and lrc_r.json():
             results = lrc_r.json()
