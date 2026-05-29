@@ -78,36 +78,69 @@ async def spotify_callback(request: Request):
             "stored_at":  time.time(),
         }
 
-        # Show HTML page with deep link back to PWA
+        # Show HTML page with the short code to copy
+        from fastapi.responses import HTMLResponse
         html = f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Connexion réussie</title>
+  <title>Spotify connecté !</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ background: #0d0f14; color: #e0d8c8; font-family: Georgia, serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 32px; text-align: center; }}
-    .icon {{ font-size: 64px; margin-bottom: 24px; }}
-    h1 {{ font-size: 24px; font-weight: 700; color: #f0e8d0; margin-bottom: 12px; }}
-    p {{ color: #666; font-size: 15px; line-height: 1.5; margin-bottom: 32px; }}
-    a {{ display: block; background: #e8c97a; color: #000; border-radius: 14px; padding: 16px 32px; font-size: 17px; font-weight: 700; text-decoration: none; margin-bottom: 12px; }}
-    .sub {{ font-size: 13px; color: #444; }}
+    body {{ background: #0d0f14; color: #e0d8c8; font-family: Georgia, serif;
+           display: flex; flex-direction: column; align-items: center;
+           justify-content: center; min-height: 100vh; padding: 32px; text-align: center; }}
+    .icon {{ font-size: 64px; margin-bottom: 20px; }}
+    h1 {{ font-size: 22px; font-weight: 700; color: #f0e8d0; margin-bottom: 8px; }}
+    .sub {{ color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 32px; }}
+    .code-box {{ background: #13161d; border: 2px solid #e8c97a; border-radius: 16px;
+                padding: 24px 32px; margin-bottom: 24px; cursor: pointer; }}
+    .code-label {{ font-size: 11px; letter-spacing: 0.2em; color: #666;
+                  text-transform: uppercase; margin-bottom: 10px; }}
+    .code {{ font-size: 36px; font-weight: 700; color: #e8c97a;
+            letter-spacing: 0.15em; font-family: monospace; }}
+    .copy-btn {{ background: #e8c97a; color: #000; border: none; border-radius: 12px;
+               padding: 14px 28px; font-size: 16px; font-weight: 700;
+               cursor: pointer; margin-bottom: 16px; width: 100%; font-family: inherit; }}
+    .hint {{ color: #444; font-size: 13px; line-height: 1.5; }}
+    .copied {{ color: #7ec87e; font-size: 14px; margin-top: 8px; display: none; }}
   </style>
 </head>
 <body>
-  <div class="icon">🎤</div>
+  <div class="icon">✅</div>
   <h1>Spotify connecté !</h1>
-  <p>Appuie sur le bouton ci-dessous<br/>pour retourner dans l'appli Lyrics.</p>
-  <a href="{APP_URL}?sp={short_code}">Ouvrir Lyrics App</a>
-  <p class="sub">Si l'appli ne s'ouvre pas, copie ce code :<br/><strong style="color:#e8c97a">{short_code}</strong></p>
+  <p class="sub">Copie ce code et retourne<br/>dans l'appli Lyrics pour le coller.</p>
+
+  <div class="code-box" onclick="copyCode()">
+    <div class="code-label">Ton code</div>
+    <div class="code" id="code">{short_code}</div>
+  </div>
+
+  <button class="copy-btn" onclick="copyCode()">📋 Copier le code</button>
+  <div class="copied" id="copied">✅ Copié !</div>
+
+  <p class="hint">Retourne dans l'appli Lyrics →<br/>Section Spotify → Entre le code</p>
+
   <script>
-    // Try to redirect automatically
-    setTimeout(() => {{ window.location.href = "{APP_URL}?sp={short_code}"; }}, 1000);
+    function copyCode() {{
+      navigator.clipboard?.writeText("{short_code}").then(() => {{
+        document.getElementById("copied").style.display = "block";
+        document.querySelector(".copy-btn").textContent = "✅ Copié !";
+      }}).catch(() => {{
+        // Fallback: select the text
+        const el = document.getElementById("code");
+        const range = document.createRange();
+        range.selectNode(el);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+      }});
+    }}
+    // Auto-copy on load
+    setTimeout(() => copyCode(), 500);
   </script>
 </body>
 </html>"""
-        from fastapi.responses import HTMLResponse
         return HTMLResponse(content=html)
 
     except Exception:
