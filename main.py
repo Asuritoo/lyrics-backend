@@ -224,55 +224,86 @@ async def search_lyrics(title: str, artist: str = ""):
             if yt_key in _youtube_cache:
                 return _youtube_cache[yt_key]
             try:
-                # Priority 1: YouTube Music Topic channel (auto-generated, clean audio)
-                # Priority 2: Official audio/video
-                # Priority 3: Lyrics video
+                # Strategy: run all queries in parallel, pick best scored result
                 queries = [
-                    f"{title} {artist} topic",           # YouTube Music auto-generated
-                    f"{title} {artist} official audio",   # Official audio
-                    f"{title} {artist} official video",   # Official video
+                    f"{artist} - {title}",                    # Exact match first
+                    f"{title} {artist} topic",                # YouTube Music auto-generated
+                    f"{title} {artist} official audio",       # Official audio
+                    f"{title} {artist} lyrics",               # Lyrics video
                 ]
-                for query in queries:
-                    yt_params = {
-                        "part": "snippet",
-                        "q": query,
-                        "type": "video",
-                        "videoCategoryId": "10",  # Music category
-                        "maxResults": 5,
-                        "key": YOUTUBE_API_KEY,
-                    }
-                    r = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=8)
-                    if r.status_code != 200:
-                        continue
-                    items = r.json().get("items", [])
-                    if not items:
-                        continue
-                    # Score each result
-                    def score(item):
-                        t = item["snippet"]["title"].lower()
-                        ch = item["snippet"]["channelTitle"].lower()
-                        s = 0
-                        if "- topic" in ch: s += 10        # YouTube Music auto-generated
-                        if "official audio" in t: s += 8
-                        if "official video" in t: s += 6
-                        if "lyrics" in t: s += 4
-                        if "official" in t: s += 3
-                        if "music video" in t: s += 2
-                        if "cover" in t: s -= 5            # Penalize covers
-                        if "karaoke" in t: s -= 8          # Penalize karaoke
-                        if "remix" in t and "official" not in t: s -= 3
-                        return s
-                    best_yt = max(items, key=score)
-                    if best_yt:
-                        result = {
-                            "videoId":    best_yt["id"]["videoId"],
-                            "videoTitle": best_yt["snippet"]["title"],
-                            "thumbnail":  best_yt["snippet"]["thumbnails"]["medium"]["url"],
+
+                async def search_query(query):
+                    try:
+                        params = {
+                            "part": "snippet",
+                            "q": query,
+                            "type": "video",
+                            "videoCategoryId": "10",
+                            "maxResults": 5,
+                            "key": YOUTUBE_API_KEY,
                         }
-                        _youtube_cache[yt_key] = result
-                        if len(_youtube_cache) > 500:
-                            del _youtube_cache[next(iter(_youtube_cache))]
-                        return result
+                        r = await client.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=6)
+                        if r.status_code == 200:
+                            return r.json().get("items", [])
+                    except:
+                        pass
+                    return []
+
+                import asyncio
+                all_results = await asyncio.gather(*[search_query(q) for q in queries])
+
+                def score(item, q_idx):
+                    t = item["snippet"]["title"].lower()
+                    ch = item["snippet"]["channelTitle"].lower()
+                    art = artist.lower().strip()
+                    tit = title.lower().strip()
+                    s = 0
+                    # Exact match bonus
+                    if tit in t and art in t: s += 15
+                    elif tit in t: s += 8
+                    # Channel type
+                    if "- topic" in ch: s += 12       # YouTube Music — same audio as Spotify
+                    if art in ch: s += 6               # Artist's own channel
+                    # Video type
+                    if "official audio" in t: s += 9
+                    if "official video" in t: s += 7
+                    if "lyrics" in t: s += 5
+                    if "official" in t: s += 3
+                    if "music video" in t: s += 2
+                    if "audio" in t: s += 1
+                    # Penalize bad matches
+                    if "cover" in t: s -= 8
+                    if "karaoke" in t: s -= 10
+                    if "instrumental" in t: s -= 8
+                    if "live" in t and "official" not in t: s -= 4
+                    if "remix" in t and "official" not in t: s -= 4
+                    if "reaction" in t: s -= 10
+                    if "tutorial" in t: s -= 10
+                    # Query priority bonus
+                    s += (3 - q_idx) * 0.5
+                    return s
+
+                best_item = None
+                best_score = -999
+                for q_idx, items in enumerate(all_results):
+                    for item in items:
+                        if not item.get("id", {}).get("videoId"):
+                            continue
+                        s = score(item, q_idx)
+                        if s > best_score:
+                            best_score = s
+                            best_item = item
+
+                if best_item:
+                    result = {
+                        "videoId":    best_item["id"]["videoId"],
+                        "videoTitle": best_item["snippet"]["title"],
+                        "thumbnail":  best_item["snippet"]["thumbnails"]["medium"]["url"],
+                    }
+                    _youtube_cache[yt_key] = result
+                    if len(_youtube_cache) > 500:
+                        del _youtube_cache[next(iter(_youtube_cache))]
+                    return result
             except:
                 pass
             return {}
@@ -283,6 +314,40 @@ async def search_lyrics(title: str, artist: str = ""):
         raise HTTPException(404, "Rien trouvé")
 
     return {**lyrics_data, **youtube_data}
+
+@app.get("/search-video")
+async def search_video(title: str, artist: str = "", query: str = ""):
+    """Search for a specific YouTube video — used when user wants to change the video."""
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(503, "YouTube API not configured")
+    search_query = query if query else f"{title} {artist}"
+    async with httpx.AsyncClient() as client:
+        try:
+            params = {
+                "part": "snippet",
+                "q": search_query,
+                "type": "video",
+                "videoCategoryId": "10",
+                "maxResults": 8,
+                "key": YOUTUBE_API_KEY,
+            }
+            r = await client.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=8)
+            if r.status_code == 200:
+                items = r.json().get("items", [])
+                results = []
+                for item in items:
+                    if not item.get("id", {}).get("videoId"):
+                        continue
+                    results.append({
+                        "videoId":    item["id"]["videoId"],
+                        "videoTitle": item["snippet"]["title"],
+                        "channel":    item["snippet"]["channelTitle"],
+                        "thumbnail":  item["snippet"]["thumbnails"]["medium"]["url"],
+                    })
+                return {"results": results}
+        except:
+            pass
+    raise HTTPException(404, "Aucun résultat")
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
