@@ -220,19 +220,45 @@ async def search_lyrics(title: str, artist: str = ""):
             if not YOUTUBE_API_KEY:
                 return {}
             try:
-                query = f"{title} {artist} official audio"
-                yt_params = {"part": "snippet", "q": query, "type": "video", "maxResults": 5, "key": YOUTUBE_API_KEY}
-                r = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=8)
-                if r.status_code == 200:
+                # Priority 1: YouTube Music Topic channel (auto-generated, clean audio)
+                # Priority 2: Official audio/video
+                # Priority 3: Lyrics video
+                queries = [
+                    f"{title} {artist} topic",           # YouTube Music auto-generated
+                    f"{title} {artist} official audio",   # Official audio
+                    f"{title} {artist} official video",   # Official video
+                ]
+                for query in queries:
+                    yt_params = {
+                        "part": "snippet",
+                        "q": query,
+                        "type": "video",
+                        "videoCategoryId": "10",  # Music category
+                        "maxResults": 5,
+                        "key": YOUTUBE_API_KEY,
+                    }
+                    r = await client.get("https://www.googleapis.com/youtube/v3/search", params=yt_params, timeout=8)
+                    if r.status_code != 200:
+                        continue
                     items = r.json().get("items", [])
-                    best_yt = None
-                    for item in items:
+                    if not items:
+                        continue
+                    # Score each result
+                    def score(item):
                         t = item["snippet"]["title"].lower()
-                        if any(k in t for k in ["official audio", "lyrics", "official video"]):
-                            best_yt = item
-                            break
-                    if not best_yt and items:
-                        best_yt = items[0]
+                        ch = item["snippet"]["channelTitle"].lower()
+                        s = 0
+                        if "- topic" in ch: s += 10        # YouTube Music auto-generated
+                        if "official audio" in t: s += 8
+                        if "official video" in t: s += 6
+                        if "lyrics" in t: s += 4
+                        if "official" in t: s += 3
+                        if "music video" in t: s += 2
+                        if "cover" in t: s -= 5            # Penalize covers
+                        if "karaoke" in t: s -= 8          # Penalize karaoke
+                        if "remix" in t and "official" not in t: s -= 3
+                        return s
+                    best_yt = max(items, key=score)
                     if best_yt:
                         return {
                             "videoId":    best_yt["id"]["videoId"],
