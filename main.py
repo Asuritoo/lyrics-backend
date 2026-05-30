@@ -160,22 +160,34 @@ async def get_token(code: str):
         "expires_in":    entry["expires_in"],
     }
 
+# In-memory cache for bulk imports — avoids duplicate requests
+_lyrics_cache = {}
+
 @app.get("/lyrics")
 async def lyrics_only(title: str, artist: str = ""):
     """Fast endpoint — only fetches lyrics, no YouTube. Used during bulk import."""
+    cache_key = f"{title.lower().strip()}|{artist.lower().strip()}"
+    if cache_key in _lyrics_cache:
+        return _lyrics_cache[cache_key]
     async with httpx.AsyncClient() as client:
         try:
             lrc_params = {"track_name": title, "artist_name": artist}
-            r = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=8)
+            r = await client.get("https://lrclib.net/api/search", params=lrc_params, timeout=4)
             if r.status_code == 200 and r.json():
                 results = r.json()
                 best = next((x for x in results if x.get("syncedLyrics")), results[0])
-                return {
+                result = {
                     "title":  best.get("trackName"),
                     "artist": best.get("artistName"),
                     "synced": best.get("syncedLyrics"),
                     "plain":  best.get("plainLyrics"),
                 }
+                _lyrics_cache[cache_key] = result
+                # Keep cache small
+                if len(_lyrics_cache) > 500:
+                    oldest = next(iter(_lyrics_cache))
+                    del _lyrics_cache[oldest]
+                return result
         except:
             pass
     raise HTTPException(404, "Rien trouvé")
