@@ -162,6 +162,7 @@ async def get_token(code: str):
 
 # In-memory cache for bulk imports — avoids duplicate requests
 _lyrics_cache = {}
+_youtube_cache = {}
 
 @app.get("/lyrics")
 async def lyrics_only(title: str, artist: str = ""):
@@ -219,6 +220,9 @@ async def search_lyrics(title: str, artist: str = ""):
         async def fetch_youtube():
             if not YOUTUBE_API_KEY:
                 return {}
+            yt_key = f"{title.lower().strip()}|{artist.lower().strip()}"
+            if yt_key in _youtube_cache:
+                return _youtube_cache[yt_key]
             try:
                 # Priority 1: YouTube Music Topic channel (auto-generated, clean audio)
                 # Priority 2: Official audio/video
@@ -260,11 +264,15 @@ async def search_lyrics(title: str, artist: str = ""):
                         return s
                     best_yt = max(items, key=score)
                     if best_yt:
-                        return {
+                        result = {
                             "videoId":    best_yt["id"]["videoId"],
                             "videoTitle": best_yt["snippet"]["title"],
                             "thumbnail":  best_yt["snippet"]["thumbnails"]["medium"]["url"],
                         }
+                        _youtube_cache[yt_key] = result
+                        if len(_youtube_cache) > 500:
+                            del _youtube_cache[next(iter(_youtube_cache))]
+                        return result
             except:
                 pass
             return {}
